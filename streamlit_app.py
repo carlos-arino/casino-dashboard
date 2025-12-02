@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 # --- CONFIGURACIÓN ---
-BROKER = "instrumentacion-uji.dynv6.net"
+BROKER = "test.mosquitto.org"
 PORT = 1883
 TOPIC_ESTADO = "instrumentacion/estado_casino" # Tópico de monitoreo (según tu prompt)
 TOPIC_COMANDOS = "instrumentacion/blackjack"   # Tópico para enviar órdenes [cite: 7]
