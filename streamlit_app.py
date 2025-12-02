@@ -1,151 +1,136 @@
 import streamlit as st
+import paho.mqtt.client as mqtt
+import json
 import pandas as pd
-import math
+import time
+from datetime import datetime
 from pathlib import Path
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# --- CONFIGURACIÓN ---
+BROKER = "instrumentacion-uji.dynv6.net"
+PORT = 1883
+TOPIC_ESTADO = "instrumentacion/estado_casino" # Tópico de monitoreo (según tu prompt)
+TOPIC_COMANDOS = "instrumentacion/blackjack"   # Tópico para enviar órdenes [cite: 7]
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# --- GESTIÓN DE ESTADO (Session State) ---
+if "datos_casino" not in st.session_state:
+    st.session_state["datos_casino"] = {}
+if "ultimo_update" not in st.session_state:
+    st.session_state["ultimo_update"] = "Esperando datos..."
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+# --- FUNCIONES MQTT ---
+def on_connect(client, userdata, flags, rc):
+    if rc == 0:
+        print("Conectado al broker MQTT")
+        client.subscribe(TOPIC_ESTADO)
+    else:
+        print(f"Error de conexión: {rc}")
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
+def on_message(client, userdata, msg):
     """
+    Callback que recibe el JSON global con todos los jugadores.
+    Actualiza el estado de la sesión para que Streamlit lo renderice.
+    """
+    try:
+        payload = msg.payload.decode()
+        data = json.loads(payload)
+        
+        # Actualizamos el estado de Streamlit
+        # Nota: En entornos complejos, usar colas es más seguro, 
+        # pero para este prototipo la escritura directa funciona.
+        st.session_state["datos_casino"] = data
+        st.session_state["ultimo_update"] = datetime.now().strftime("%H:%M:%S")
+        
+    except Exception as e:
+        print(f"Error procesando mensaje: {e}")
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+# --- INICIALIZACIÓN DEL CLIENTE MQTT (SINGLETON) ---
+@st.cache_resource
+def init_mqtt():
+    """
+    Inicializa el cliente MQTT una sola vez y lo mantiene vivo
+    mientras la app de Streamlit se ejecuta.
+    """
+    client = mqtt.Client()
+    client.on_connect = on_connect
+    client.on_message = on_message
+    
+    try:
+        client.connect(BROKER, PORT, 60)
+        client.loop_start() # Ejecuta el loop en un hilo separado
+        return client
+    except Exception as e:
+        st.error(f"No se pudo conectar al broker: {e}")
+        return None
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+client = init_mqtt()
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
+# --- INTERFAZ STREAMLIT ---
+st.set_page_config(page_title="Monitor Blackjack", layout="wide")
+
+st.title("🎰 Monitor y Consola de Blackjack")
+st.markdown(f"**Broker:** `{BROKER}` | **Estado:** `{TOPIC_ESTADO}`")
+
+# 1. SECCIÓN DE MONITORIZACIÓN (TABLA)
+st.subheader("📊 Estado de los Jugadores")
+
+# Contenedor para la tabla que se actualizará
+placeholder_tabla = st.empty()
+
+# Lógica de renderizado de la tabla
+data = st.session_state["datos_casino"]
+
+if data:
+    # Convertir el diccionario de diccionarios a DataFrame
+    # orient='index' usa las claves (nombres) como índice (filas)
+    df = pd.read_json(json.dumps(data), orient='index')
+    
+    # Reordenar columnas para mejor visualización si existen
+    columnas_deseadas = ['estado', 'fondos', 'partidas', 'ganadas', 'jugador', 'crupier']
+    # Filtramos solo las que existan en el df para evitar errores
+    cols_finales = [c for c in columnas_deseadas if c in df.columns]
+    
+    # Mostrar la tabla en el placeholder
+    placeholder_tabla.dataframe(df[cols_finales], use_container_width=True)
+    st.caption(f"Última actualización recibida: {st.session_state['ultimo_update']}")
+else:
+    placeholder_tabla.info("Esperando recepción de datos JSON del casino...")
+
+st.divider()
+
+# 2. SECCIÓN DE CONTROL (JUGAR)
+st.subheader("🎮 Enviar Comandos")
+
+col1, col2, col3 = st.columns([2, 2, 1])
+
+with col1:
+    # Input para el nombre del jugador [cite: 10]
+    nombre_jugador = st.text_input("Nombre del Jugador", value="jugador_st_01")
+
+with col2:
+    # Selector de acción posible 
+    accion_seleccionada = st.selectbox(
+        "Acción", 
+        options=["nueva", "carta", "planto"],
+        format_func=lambda x: x.upper()
     )
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+with col3:
+    st.write("Confirmar:")
+    enviar = st.button("Enviar Orden 🚀", use_container_width=True)
 
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+if enviar:
+    if client:
+        # Construcción del JSON según requisitos del usuario
+        # Nota: El usuario especificó "accion" (sin tilde) para la key.
+        payload = {
+            "jugador": nombre_jugador,
+            "accion": accion_seleccionada  # Sin tilde según tu instrucción
+        }
+        
+        mensaje_json = json.dumps(payload)
+        client.publish(TOPIC_COMANDOS, mensaje_json)
+        
+        st.toast(f"Enviado: {mensaje_json} a {TOPIC_COMANDOS}")
+    else:
+        st.error("Error: No hay conexión MQTT")
